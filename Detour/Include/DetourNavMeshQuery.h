@@ -388,6 +388,20 @@ public:
 	dtStatus moveAlongSurface(dtPolyRef startRef, const float* startPos, const float* endPos,
 							  const dtQueryFilter* filter,
 							  float* resultPos, dtPolyRef* visited, int* visitedCount, const int maxVisitedSize) const;
+
+	/// Moves from the start position with the velocity position constrained to the navigation mesh.
+	///  @param[in]		startRef		The reference id of the start polygon.
+	///  @param[in]		startPos		A position of the mover within the start polygon. [(x, y, x)]
+	///  @param[in]		endPos			The desired end position of the mover. [(x, y, z)]
+	///  @param[in]		filter			The polygon filter to apply to the query.
+	///  @param[out]	resultPos		The result position of the mover. [(x, y, z)]
+	///  @param[out]	visited			The reference ids of the polygons visited during the move.
+	///  @param[out]	visitedCount	The number of polygons visited during the move.
+	///  @param[in]		maxVisitedSize	The maximum number of polygons the @p visited array can hold.
+	/// @returns The status flags for the query.
+	dtStatus moveAlongSurfaceWithVelocity(dtPolyRef startRef, const float* startPos, const float* velocity,
+							  const dtQueryFilter* filter,
+							  float* resultPos, dtPolyRef* visited, int* visitedCount, const int maxVisitedSize) const;
 	
 	/// Casts a 'walkability' ray along the surface of the navigation mesh from 
 	/// the start position toward the end position.

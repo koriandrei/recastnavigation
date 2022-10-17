@@ -2233,6 +2233,17 @@ dtStatus dtNavMeshQuery::moveAlongSurface(dtPolyRef startRef, const float* start
 	return status;
 }
 
+dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
+    dtPolyRef startRef, const float* startPos, const float* velocity,
+    const dtQueryFilter* filter, float* resultPos, dtPolyRef* visited,
+    int* visitedCount, const int maxVisitedSize) const {
+  float endPos[3];
+
+  dtVadd(endPos, startPos, velocity);
+
+  return moveAlongSurface(startRef, startPos, endPos, filter, resultPos,
+                          visited, visitedCount, maxVisitedSize);
+}
 
 dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, dtPolyRef to, float* left, float* right,
 										 unsigned char& fromType, unsigned char& toType) const
