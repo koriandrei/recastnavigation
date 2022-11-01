@@ -2237,224 +2237,338 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
     dtPolyRef startRef, const float* startPos, const float* velocity,
     const dtQueryFilter* filter, float* resultPos, dtPolyRef* visited,
     int* visitedCount, const int maxVisitedSize) const {
+  dtAssert(m_nav);
+  dtAssert(m_tinyNodePool);
 
-	dtAssert(m_nav);
-	dtAssert(m_tinyNodePool);
+  if (!visitedCount) return DT_FAILURE | DT_INVALID_PARAM;
 
-	if (!visitedCount)
-		return DT_FAILURE | DT_INVALID_PARAM;
+  *visitedCount = 0;
 
-	*visitedCount = 0;
+  if (!m_nav->isValidPolyRef(startRef) || !startPos || !dtVisfinite(startPos) ||
+      !velocity || !dtVisfinite(velocity) || !filter || !resultPos ||
+      !visited || maxVisitedSize <= 0) {
+    return DT_FAILURE | DT_INVALID_PARAM;
+  }
 
-	if (!m_nav->isValidPolyRef(startRef) ||
-		!startPos || !dtVisfinite(startPos) ||
-		!endPos || !dtVisfinite(endPos) ||
-		!filter || !resultPos || !visited ||
-		maxVisitedSize <= 0)
-	{
-		return DT_FAILURE | DT_INVALID_PARAM;
-	}
-	
-	dtStatus status = DT_SUCCESS;
-	
-	static const int MAX_STACK = 48;
-	dtNode* stack[MAX_STACK];
-	int nstack = 0;
-	
-	m_tinyNodePool->clear();
-	
-	dtNode* startNode = m_tinyNodePool->getNode(startRef);
-	startNode->pidx = 0;
-	startNode->cost = 0;
-	startNode->total = 0;
-	startNode->id = startRef;
-	startNode->flags = DT_NODE_CLOSED;
-	stack[nstack++] = startNode;
-	
-	float bestPos[3];
-	float bestDist = FLT_MAX;
-	dtNode* bestNode = 0;
-	dtVcopy(bestPos, startPos);
-	
-	// Search constraints
-	float searchPos[3], searchRadSqr;
-	dtVlerp(searchPos, startPos, endPos, 0.5f);
-	searchRadSqr = dtSqr(dtVdist(startPos, endPos)/2.0f + 0.001f);
-	
-	float curPos[3];
-	dtVcopy(curPos, startPos);
-	float remainingMoveDelta[3];
-	dtVcopy(remainingMoveDelta, velocity);
+  dtStatus status = DT_SUCCESS;
 
-	float verts[DT_VERTS_PER_POLYGON*3];
-	
-	while (nstack)
-	{
-		// Pop front.
-		dtNode* curNode = stack[0];
-		for (int i = 0; i < nstack-1; ++i)
-			stack[i] = stack[i+1];
-		nstack--;
-		
-		// Get poly and tile.
-		// The API input has been cheked already, skip checking internal data.
-		const dtPolyRef curRef = curNode->id;
-		const dtMeshTile* curTile = 0;
-		const dtPoly* curPoly = 0;
-		m_nav->getTileAndPolyByRefUnsafe(curRef, &curTile, &curPoly);			
-		
-		// Collect vertices.
-		const int nverts = curPoly->vertCount;
-		for (int i = 0; i < nverts; ++i)
-			dtVcopy(&verts[i*3], &curTile->verts[curPoly->verts[i]*3]);
-		
-		// If target is inside the poly, stop search.
-		if (dtPointInPolygon(endPos, verts, nverts))
-		{
-			bestNode = curNode;
-			dtVcopy(bestPos, endPos);
-			break;
-		}
-		
-		float assumedPosition[3];
-		dtVadd(assumedPosition, curPos, remainingMoveDelta);
-		float raycastMinTime = 0.0f;
-		float raycastMaxTime = 1.0f;
-		int segMin = 0;
-		int segMax = 0;
-		const bool velocityIntersectsPoly = dtIntersectSegmentPoly2D(curPos, assumedPosition, verts, nverts, raycastMinTime, raycastMaxTime, segMax, segMax);
+  static const int MAX_STACK = 48;
+  dtNode* stack[MAX_STACK];
+  int nstack = 0;
 
-		// Find wall edges and find nearest point inside the walls.
-		// (i,j):
-		//       (0, last)
-		//       (1, 0)
-		//       (2, 1)
-		//       ...
-		//       (last, last-1)
-		for (int i = 0, j = (int)curPoly->vertCount-1; i < (int)curPoly->vertCount; j = i++)
-		{
-			const float* vj = &verts[j*3];
-			const float* vi = &verts[i*3];
-			float tseg;
-			const float distSqr = dtDistancePtSegSqr2D(endPos, vj, vi, tseg);
-			if (distSqr < bestDist)
-			{
-				// Update nearest distance.
-				dtVlerp(bestPos, vj,vi, tseg);
-				bestDist = distSqr;
-				bestNode = curNode;
-			}
+  m_tinyNodePool->clear();
 
-			// Find links to neighbours.
-			static const int MAX_NEIS = 8;
-			int nneis = 0;
-			dtPolyRef neis[MAX_NEIS];
-			
-			if (curPoly->neis[j] & DT_EXT_LINK)
-			{
-				// Tile border.
-				for (unsigned int k = curPoly->firstLink; k != DT_NULL_LINK; k = curTile->links[k].next)
-				{
-					const dtLink* link = &curTile->links[k];
-					if (link->edge == j)
-					{
-						if (link->ref != 0)
-						{
-							const dtMeshTile* neiTile = 0;
-							const dtPoly* neiPoly = 0;
-							m_nav->getTileAndPolyByRefUnsafe(link->ref, &neiTile, &neiPoly);
-							if (filter->passFilter(link->ref, neiTile, neiPoly))
-							{
-								if (nneis < MAX_NEIS)
-									neis[nneis++] = link->ref;
-							}
-						}
-					}
-				}
-			}
-			else if (curPoly->neis[j])
-			{
-				const unsigned int idx = (unsigned int)(curPoly->neis[j]-1);
-				const dtPolyRef ref = m_nav->getPolyRefBase(curTile) | idx;
-				if (filter->passFilter(ref, curTile, &curTile->polys[idx]))
-				{
-					// Internal edge, encode id.
-					neis[nneis++] = ref;
-				}
-			}
-			
-			if (!nneis)
-			{
-				// Wall edge, calc distance.
-			}
-			else
-			{
-				for (int k = 0; k < nneis; ++k)
-				{
-					// Skip if no node can be allocated.
-					dtNode* neighbourNode = m_tinyNodePool->getNode(neis[k]);
-					if (!neighbourNode)
-						continue;
-					// Skip if already visited.
-					if (neighbourNode->flags & DT_NODE_CLOSED)
-						continue;
-					
-					// Skip the link if it is too far from search constraint.
-					// TODO: Maybe should use getPortalPoints(), but this one is way faster.
-					const float* vj = &verts[j*3];
-					const float* vi = &verts[i*3];
-					float tseg;
-					float distSqr = dtDistancePtSegSqr2D(searchPos, vj, vi, tseg);
-					if (distSqr > searchRadSqr)
-						continue;
-					
-					// Mark as the node as visited and push to queue.
-					if (nstack < MAX_STACK)
-					{
-						neighbourNode->pidx = m_tinyNodePool->getNodeIdx(curNode);
-						neighbourNode->flags |= DT_NODE_CLOSED;
-						stack[nstack++] = neighbourNode;
-					}
-				}
-			}
-		}
-	}
-	
-	int n = 0;
-	if (bestNode)
-	{
-		// Reverse the path.
-		dtNode* prev = 0;
-		dtNode* node = bestNode;
-		do
-		{
-			dtNode* next = m_tinyNodePool->getNodeAtIdx(node->pidx);
-			node->pidx = m_tinyNodePool->getNodeIdx(prev);
-			prev = node;
-			node = next;
-		}
-		while (node);
-		
-		// Store result
-		node = prev;
-		do
-		{
-			visited[n++] = node->id;
-			if (n >= maxVisitedSize)
-			{
-				status |= DT_BUFFER_TOO_SMALL;
-				break;
-			}
-			node = m_tinyNodePool->getNodeAtIdx(node->pidx);
-		}
-		while (node);
-	}
-	
-	dtVcopy(resultPos, bestPos);
-	
-	*visitedCount = n;
-	
-	return status;
+  dtNode* startNode = m_tinyNodePool->getNode(startRef);
+  startNode->pidx = 0;
+  startNode->cost = 0;
+  startNode->total = 0;
+  startNode->id = startRef;
+  startNode->flags = DT_NODE_CLOSED;
+  stack[nstack++] = startNode;
+
+  float bestPos[3];
+  float bestDist = FLT_MAX;
+  dtNode* bestNode = 0;
+  dtVcopy(bestPos, startPos);
+
+  // Search constraints
+  // float searchPos[3], searchRadSqr;
+  // dtVlerp(searchPos, startPos, endPos, 0.5f);
+  // searchRadSqr = dtSqr(dtVdist(startPos, endPos)/2.0f + 0.001f);
+
+  float curPos[3];
+  dtVcopy(curPos, startPos);
+  float remainingMoveDelta[3];
+  dtVcopy(remainingMoveDelta, velocity);
+
+  float verts[DT_VERTS_PER_POLYGON * 3];
+
+  {
+    dtNode* curNode = stack[0];
+    while (true) {
+      // Get poly and tile.
+      // The API input has been cheked already, skip checking internal data.
+      const dtPolyRef curRef = curNode->id;
+      const dtMeshTile* curTile = 0;
+      const dtPoly* curPoly = 0;
+      m_nav->getTileAndPolyByRefUnsafe(curRef, &curTile, &curPoly);
+
+      // Collect vertices.
+      const int nverts = curPoly->vertCount;
+      for (int i = 0; i < nverts; ++i)
+        dtVcopy(&verts[i * 3], &curTile->verts[curPoly->verts[i] * 3]);
+
+      float assumedPosition[3];
+      dtVadd(assumedPosition, curPos, remainingMoveDelta);
+      float raycastMinTime = 0.0f;
+      float raycastMaxTime = 1.0f;
+      int segMin = 0;
+      int segMax = 0;
+      const bool velocityIntersectsPoly = dtIntersectSegmentPoly2D(
+          curPos, assumedPosition, verts, nverts, raycastMinTime,
+          raycastMaxTime, segMin, segMax);
+
+      if (dtPointInPolygon(assumedPosition, verts, nverts)) {
+        dtVcopy(resultPos, assumedPosition);
+        return DT_SUCCESS;
+      }
+      if (segMax < 0) {
+        dtVcopy(resultPos, assumedPosition);
+        return DT_SUCCESS;
+      }
+      float consumedMoveDelta[3];
+      float correctedPosition[3];
+      dtVlerp(correctedPosition, curPos, assumedPosition, raycastMaxTime);
+      dtVsub(consumedMoveDelta, correctedPosition, curPos);
+      dtVsub(remainingMoveDelta, remainingMoveDelta, consumedMoveDelta);
+      float zero[3]{0.0f, 0.0f, 0.0f};
+      dtVcopy(curPos, correctedPosition);
+      dtVcopy(resultPos, curPos);
+      if (dtVequal(consumedMoveDelta, zero)) {
+        // return DT_SUCCESS;
+      }
+      // Find links to neighbours.
+      static const int MAX_NEIS = 8;
+      int nneis = 0;
+      dtPolyRef neis[MAX_NEIS];
+
+      if (curPoly->neis[segMax] & DT_EXT_LINK) {
+        // Tile border.
+        for (unsigned int k = curPoly->firstLink; k != DT_NULL_LINK;
+             k = curTile->links[k].next) {
+          const dtLink* link = &curTile->links[k];
+          if (link->edge == segMax) {
+            if (link->ref != 0) {
+              const dtMeshTile* neiTile = 0;
+              const dtPoly* neiPoly = 0;
+              m_nav->getTileAndPolyByRefUnsafe(link->ref, &neiTile, &neiPoly);
+              if (filter->passFilter(link->ref, neiTile, neiPoly)) {
+                if (nneis != 0) {
+                  abort();
+                  return DT_FAILURE;
+                }
+                if (nneis < MAX_NEIS) neis[nneis++] = link->ref;
+              }
+            }
+          }
+        }
+      } else if (curPoly->neis[segMax]) {
+        const unsigned int idx = (unsigned int)(curPoly->neis[segMax] - 1);
+        const dtPolyRef ref = m_nav->getPolyRefBase(curTile) | idx;
+        if (filter->passFilter(ref, curTile, &curTile->polys[idx])) {
+          // Internal edge, encode id.
+          neis[nneis++] = ref;
+        }
+      }
+
+      if (!nneis) {
+        // This navmesh poly edge isn't connected to any other edges.
+        // There are two options now: either we detach from a navmesh (e.g. jump
+        // off a ledge), or slide along this edge (e.g. slide along a wall).
+        // TODO: Handle the second case to start with.
+        return DT_SUCCESS;
+      } else {
+        if (nneis != 1) {
+          abort();
+        }
+        for (int k = 0; k < nneis; ++k) {
+          // Skip if no node can be allocated.
+          dtNode* neighbourNode = m_tinyNodePool->getNode(neis[k]);
+          if (!neighbourNode) continue;
+          // Skip if already visited.
+          if (neighbourNode->flags & DT_NODE_CLOSED) continue;
+
+          // Skip the link if it is too far from search constraint.
+          // TODO: Maybe should use getPortalPoints(), but this one is way
+          // faster. const float* vj = &verts[segMax*3]; const float* vi =
+          // &verts[((segMax + 1) % nverts)*3]; float tseg; float distSqr =
+          // dtDistancePtSegSqr2D(searchPos, vj, vi, tseg); if (distSqr >
+          // searchRadSqr) 	continue;
+
+          // Mark as the node as visited and push to queue.
+          // if (nstack < MAX_STACK)
+          {
+            neighbourNode->pidx = m_tinyNodePool->getNodeIdx(curNode);
+            neighbourNode->flags |= DT_NODE_CLOSED;
+            curNode = neighbourNode;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // while (nstack)
+  // {
+  // 	// Pop front.
+  // 	dtNode* curNode = stack[0];
+  // 	for (int i = 0; i < nstack-1; ++i)
+  // 		stack[i] = stack[i+1];
+  // 	nstack--;
+
+  // 	// Get poly and tile.
+  // 	// The API input has been cheked already, skip checking internal data.
+  // 	const dtPolyRef curRef = curNode->id;
+  // 	const dtMeshTile* curTile = 0;
+  // 	const dtPoly* curPoly = 0;
+  // 	m_nav->getTileAndPolyByRefUnsafe(curRef, &curTile, &curPoly);
+
+  // 	// Collect vertices.
+  // 	const int nverts = curPoly->vertCount;
+  // 	for (int i = 0; i < nverts; ++i)
+  // 		dtVcopy(&verts[i*3], &curTile->verts[curPoly->verts[i]*3]);
+
+  // 	// If target is inside the poly, stop search.
+  // 	if (dtPointInPolygon(endPos, verts, nverts))
+  // 	{
+  // 		bestNode = curNode;
+  // 		dtVcopy(bestPos, endPos);
+  // 		break;
+  // 	}
+
+  // 	float assumedPosition[3];
+  // 	dtVadd(assumedPosition, curPos, remainingMoveDelta);
+  // 	float raycastMinTime = 0.0f;
+  // 	float raycastMaxTime = 1.0f;
+  // 	int segMin = 0;
+  // 	int segMax = 0;
+  // 	const bool velocityIntersectsPoly = dtIntersectSegmentPoly2D(curPos,
+  // assumedPosition, verts, nverts, raycastMinTime, raycastMaxTime, segMax,
+  // segMax);
+
+  // 	// Find wall edges and find nearest point inside the walls.
+  // 	// (i,j):
+  // 	//       (0, last)
+  // 	//       (1, 0)
+  // 	//       (2, 1)
+  // 	//       ...
+  // 	//       (last, last-1)
+  // 	for (int i = 0, j = (int)curPoly->vertCount-1; i <
+  // (int)curPoly->vertCount; j = i++)
+  // 	{
+  // 		const float* vj = &verts[j*3];
+  // 		const float* vi = &verts[i*3];
+  // 		float tseg;
+  // 		const float distSqr = dtDistancePtSegSqr2D(endPos, vj, vi,
+  // tseg); 		if (distSqr < bestDist)
+  // 		{
+  // 			// Update nearest distance.
+  // 			dtVlerp(bestPos, vj,vi, tseg);
+  // 			bestDist = distSqr;
+  // 			bestNode = curNode;
+  // 		}
+
+  // 		// Find links to neighbours.
+  // 		static const int MAX_NEIS = 8;
+  // 		int nneis = 0;
+  // 		dtPolyRef neis[MAX_NEIS];
+
+  // 		if (curPoly->neis[j] & DT_EXT_LINK)
+  // 		{
+  // 			// Tile border.
+  // 			for (unsigned int k = curPoly->firstLink; k != DT_NULL_LINK; k =
+  // curTile->links[k].next)
+  // 			{
+  // 				const dtLink* link = &curTile->links[k];
+  // 				if (link->edge == j)
+  // 				{
+  // 					if (link->ref != 0)
+  // 					{
+  // 						const dtMeshTile* neiTile = 0;
+  // 						const dtPoly* neiPoly = 0;
+  // 						m_nav->getTileAndPolyByRefUnsafe(link->ref, &neiTile,
+  // &neiPoly); 						if (filter->passFilter(link->ref, neiTile, neiPoly))
+  // 						{
+  // 							if (nneis < MAX_NEIS)
+  // 								neis[nneis++] =
+  // link->ref;
+  // 						}
+  // 					}
+  // 				}
+  // 			}
+  // 		}
+  // 		else if (curPoly->neis[j])
+  // 		{
+  // 			const unsigned int idx = (unsigned
+  // int)(curPoly->neis[j]-1); 			const dtPolyRef ref =
+  // m_nav->getPolyRefBase(curTile) | idx; 			if (filter->passFilter(ref, curTile,
+  // &curTile->polys[idx]))
+  // 			{
+  // 				// Internal edge, encode id.
+  // 				neis[nneis++] = ref;
+  // 			}
+  // 		}
+
+  // 		if (!nneis)
+  // 		{
+  // 			// Wall edge, calc distance.
+  // 		}
+  // 		else
+  // 		{
+  // 			for (int k = 0; k < nneis; ++k)
+  // 			{
+  // 				// Skip if no node can be allocated.
+  // 				dtNode* neighbourNode =
+  // m_tinyNodePool->getNode(neis[k]); 				if (!neighbourNode) 					continue;
+  // 				// Skip if already visited.
+  // 				if (neighbourNode->flags & DT_NODE_CLOSED)
+  // 					continue;
+
+  // 				// Skip the link if it is too far from search
+  // constraint.
+  // 				// TODO: Maybe should use getPortalPoints(), but this one is
+  // way faster. 				const float* vj = &verts[j*3]; 				const float* vi = &verts[i*3];
+  // 				float tseg;
+  // 				float distSqr = dtDistancePtSegSqr2D(searchPos, vj, vi,
+  // tseg); 				if (distSqr > searchRadSqr) 					continue;
+
+  // 				// Mark as the node as visited and push to
+  // queue. 				if (nstack < MAX_STACK)
+  // 				{
+  // 					neighbourNode->pidx =
+  // m_tinyNodePool->getNodeIdx(curNode); 					neighbourNode->flags |=
+  // DT_NODE_CLOSED; 					stack[nstack++] = neighbourNode;
+  // 				}
+  // 			}
+  // 		}
+  // 	}
+  // }
+
+  // int n = 0;
+  // if (bestNode)
+  // {
+  // 	// Reverse the path.
+  // 	dtNode* prev = 0;
+  // 	dtNode* node = bestNode;
+  // 	do
+  // 	{
+  // 		dtNode* next = m_tinyNodePool->getNodeAtIdx(node->pidx);
+  // 		node->pidx = m_tinyNodePool->getNodeIdx(prev);
+  // 		prev = node;
+  // 		node = next;
+  // 	}
+  // 	while (node);
+
+  // 	// Store result
+  // 	node = prev;
+  // 	do
+  // 	{
+  // 		visited[n++] = node->id;
+  // 		if (n >= maxVisitedSize)
+  // 		{
+  // 			status |= DT_BUFFER_TOO_SMALL;
+  // 			break;
+  // 		}
+  // 		node = m_tinyNodePool->getNodeAtIdx(node->pidx);
+  // 	}
+  // 	while (node);
+  // }
+
+  // dtVcopy(resultPos, bestPos);
+
+  // *visitedCount = n;
+
+  // return status;
 }
 
 dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, dtPolyRef to, float* left, float* right,
