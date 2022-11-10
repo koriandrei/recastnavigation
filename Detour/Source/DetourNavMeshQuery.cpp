@@ -2366,7 +2366,57 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
         // There are two options now: either we detach from a navmesh (e.g. jump
         // off a ledge), or slide along this edge (e.g. slide along a wall).
         // TODO: Handle the second case to start with.
-        return DT_SUCCESS;
+        constexpr bool shouldSlide = true;
+        if constexpr (shouldSlide) {
+          const float* edgeSlideVert = &curTile->verts[segMax * 3];
+          const float* edgeSlideVert2 =
+              &curTile->verts[((segMax + 1) % curPoly->vertCount) * 3];
+
+          float dir[3];
+          dtVsub(dir, edgeSlideVert, edgeSlideVert2);
+
+          float dirNorm[3]{dir[0], dir[1], dir[2]};
+          dtVnormalize(dirNorm);
+
+          float moveDeltaProjectedLength = dtVdot(dirNorm, remainingMoveDelta);
+
+          if (abs(moveDeltaProjectedLength) < 0.00001f) {
+            // There's nowhere to go from here - we're walking perpendicular to
+            // the edge.
+            return DT_SUCCESS;
+          }
+
+          if (moveDeltaProjectedLength < 0) {
+            dir[0] = -dir[0];
+            dir[1] = -dir[1];
+            dir[2] = -dir[2];
+
+            dirNorm[0] = -dirNorm[0];
+            dirNorm[1] = -dirNorm[1];
+            dirNorm[2] = -dirNorm[2];
+
+            moveDeltaProjectedLength = -moveDeltaProjectedLength;
+          }
+
+          const float moveDeltaOriginalLength = dtVlen(remainingMoveDelta);
+
+          const float moveDeltaRemainingLength =
+              moveDeltaOriginalLength - moveDeltaProjectedLength;
+
+          if (moveDeltaRemainingLength < 0) {
+            abort();
+          }
+
+          const float remainingMoveDeltaScaleFactor =
+              moveDeltaRemainingLength / moveDeltaOriginalLength;
+
+          dtVscale(remainingMoveDelta, remainingMoveDelta,
+                   remainingMoveDeltaScaleFactor);
+
+          dtVmad(curPos, curPos, dirNorm, moveDeltaProjectedLength);
+        } else {
+          return DT_SUCCESS;
+        }
       } else {
         if (nneis != 1) {
           abort();
