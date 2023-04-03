@@ -2304,6 +2304,7 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
       float raycastMaxTime = 1.0f;
       int segMin = 0;
       int segMax = 0;
+
       const bool velocityIntersectsPoly = dtIntersectSegmentPoly2D(
           curPos, assumedPosition, verts, nverts, raycastMinTime,
           raycastMaxTime, segMin, segMax);
@@ -2368,25 +2369,35 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
         // TODO: Handle the second case to start with.
         constexpr bool shouldSlide = true;
         if constexpr (shouldSlide) {
-          const float* edgeSlideVert = &curTile->verts[segMax * 3];
+          const float* edgeSlideVert = &verts[segMax * 3];
           const float* edgeSlideVert2 =
-              &curTile->verts[((segMax + 1) % curPoly->vertCount) * 3];
+              &verts[((segMax + 1) % curPoly->vertCount) * 3];
 
           float dir[3];
           dtVsub(dir, edgeSlideVert, edgeSlideVert2);
 
-          float dirNorm[3]{dir[0], dir[1], dir[2]};
-          dtVnormalize(dirNorm);
+		const float edgeLength = dtVdist(edgeSlideVert, edgeSlideVert2);
+
+          float dirNorm[3]; // {dir[0], dir[1], dir[2]};
+		  dtVscale(dirNorm, dir, 1.0f/ edgeLength);
+        //   dtVnormalize(dirNorm);
 
           float moveDeltaProjectedLength = dtVdot(dirNorm, remainingMoveDelta);
 
-          if (abs(moveDeltaProjectedLength) < 0.00001f) {
-            // There's nowhere to go from here - we're walking perpendicular to
-            // the edge.
-            return DT_SUCCESS;
-          }
+		const float* moveDirectionVert = moveDeltaProjectedLength > 0.0f ? edgeSlideVert : edgeSlideVert2;
+		const float remainingEdgeLength = dtVdist(moveDirectionVert, curPos);
 
-          if (moveDeltaProjectedLength < 0) {
+		if (moveDeltaProjectedLength > remainingEdgeLength)
+		{
+			moveDeltaProjectedLength = remainingEdgeLength;
+		}
+
+		  if (moveDeltaProjectedLength < 0.00001f)
+		  {
+            return DT_SUCCESS;
+		  }
+
+          if (false && moveDeltaProjectedLength < 0) {
             dir[0] = -dir[0];
             dir[1] = -dir[1];
             dir[2] = -dir[2];
@@ -2412,10 +2423,17 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
 
           dtVscale(remainingMoveDelta, remainingMoveDelta,
                    remainingMoveDeltaScaleFactor);
+float shiftedPos[3];
+          dtVmad(shiftedPos, curPos, dirNorm, moveDeltaProjectedLength);
 
-          dtVmad(curPos, curPos, dirNorm, moveDeltaProjectedLength);
-        } else {
-          return DT_SUCCESS;
+		if (!dtPointInPolygon(shiftedPos, verts, nverts))
+		{
+			const float distanceToPoint = dtVdist(edgeSlideVert, shiftedPos) + dtVdist(edgeSlideVert2, shiftedPos);
+			const float edgeLength = dtVlen(dir);
+			dtAssert(dtAbs(distanceToPoint - edgeLength) < 0.0001f);
+		}
+		dtVcopy(curPos, shiftedPos);
+        //   return DT_SUCCESS;
         }
       } else {
         if (nneis != 1) {
@@ -2447,178 +2465,6 @@ dtStatus dtNavMeshQuery::moveAlongSurfaceWithVelocity(
       }
     }
   }
-
-  // while (nstack)
-  // {
-  // 	// Pop front.
-  // 	dtNode* curNode = stack[0];
-  // 	for (int i = 0; i < nstack-1; ++i)
-  // 		stack[i] = stack[i+1];
-  // 	nstack--;
-
-  // 	// Get poly and tile.
-  // 	// The API input has been cheked already, skip checking internal data.
-  // 	const dtPolyRef curRef = curNode->id;
-  // 	const dtMeshTile* curTile = 0;
-  // 	const dtPoly* curPoly = 0;
-  // 	m_nav->getTileAndPolyByRefUnsafe(curRef, &curTile, &curPoly);
-
-  // 	// Collect vertices.
-  // 	const int nverts = curPoly->vertCount;
-  // 	for (int i = 0; i < nverts; ++i)
-  // 		dtVcopy(&verts[i*3], &curTile->verts[curPoly->verts[i]*3]);
-
-  // 	// If target is inside the poly, stop search.
-  // 	if (dtPointInPolygon(endPos, verts, nverts))
-  // 	{
-  // 		bestNode = curNode;
-  // 		dtVcopy(bestPos, endPos);
-  // 		break;
-  // 	}
-
-  // 	float assumedPosition[3];
-  // 	dtVadd(assumedPosition, curPos, remainingMoveDelta);
-  // 	float raycastMinTime = 0.0f;
-  // 	float raycastMaxTime = 1.0f;
-  // 	int segMin = 0;
-  // 	int segMax = 0;
-  // 	const bool velocityIntersectsPoly = dtIntersectSegmentPoly2D(curPos,
-  // assumedPosition, verts, nverts, raycastMinTime, raycastMaxTime, segMax,
-  // segMax);
-
-  // 	// Find wall edges and find nearest point inside the walls.
-  // 	// (i,j):
-  // 	//       (0, last)
-  // 	//       (1, 0)
-  // 	//       (2, 1)
-  // 	//       ...
-  // 	//       (last, last-1)
-  // 	for (int i = 0, j = (int)curPoly->vertCount-1; i <
-  // (int)curPoly->vertCount; j = i++)
-  // 	{
-  // 		const float* vj = &verts[j*3];
-  // 		const float* vi = &verts[i*3];
-  // 		float tseg;
-  // 		const float distSqr = dtDistancePtSegSqr2D(endPos, vj, vi,
-  // tseg); 		if (distSqr < bestDist)
-  // 		{
-  // 			// Update nearest distance.
-  // 			dtVlerp(bestPos, vj,vi, tseg);
-  // 			bestDist = distSqr;
-  // 			bestNode = curNode;
-  // 		}
-
-  // 		// Find links to neighbours.
-  // 		static const int MAX_NEIS = 8;
-  // 		int nneis = 0;
-  // 		dtPolyRef neis[MAX_NEIS];
-
-  // 		if (curPoly->neis[j] & DT_EXT_LINK)
-  // 		{
-  // 			// Tile border.
-  // 			for (unsigned int k = curPoly->firstLink; k != DT_NULL_LINK; k =
-  // curTile->links[k].next)
-  // 			{
-  // 				const dtLink* link = &curTile->links[k];
-  // 				if (link->edge == j)
-  // 				{
-  // 					if (link->ref != 0)
-  // 					{
-  // 						const dtMeshTile* neiTile = 0;
-  // 						const dtPoly* neiPoly = 0;
-  // 						m_nav->getTileAndPolyByRefUnsafe(link->ref, &neiTile,
-  // &neiPoly); 						if (filter->passFilter(link->ref, neiTile, neiPoly))
-  // 						{
-  // 							if (nneis < MAX_NEIS)
-  // 								neis[nneis++] =
-  // link->ref;
-  // 						}
-  // 					}
-  // 				}
-  // 			}
-  // 		}
-  // 		else if (curPoly->neis[j])
-  // 		{
-  // 			const unsigned int idx = (unsigned
-  // int)(curPoly->neis[j]-1); 			const dtPolyRef ref =
-  // m_nav->getPolyRefBase(curTile) | idx; 			if (filter->passFilter(ref, curTile,
-  // &curTile->polys[idx]))
-  // 			{
-  // 				// Internal edge, encode id.
-  // 				neis[nneis++] = ref;
-  // 			}
-  // 		}
-
-  // 		if (!nneis)
-  // 		{
-  // 			// Wall edge, calc distance.
-  // 		}
-  // 		else
-  // 		{
-  // 			for (int k = 0; k < nneis; ++k)
-  // 			{
-  // 				// Skip if no node can be allocated.
-  // 				dtNode* neighbourNode =
-  // m_tinyNodePool->getNode(neis[k]); 				if (!neighbourNode) 					continue;
-  // 				// Skip if already visited.
-  // 				if (neighbourNode->flags & DT_NODE_CLOSED)
-  // 					continue;
-
-  // 				// Skip the link if it is too far from search
-  // constraint.
-  // 				// TODO: Maybe should use getPortalPoints(), but this one is
-  // way faster. 				const float* vj = &verts[j*3]; 				const float* vi = &verts[i*3];
-  // 				float tseg;
-  // 				float distSqr = dtDistancePtSegSqr2D(searchPos, vj, vi,
-  // tseg); 				if (distSqr > searchRadSqr) 					continue;
-
-  // 				// Mark as the node as visited and push to
-  // queue. 				if (nstack < MAX_STACK)
-  // 				{
-  // 					neighbourNode->pidx =
-  // m_tinyNodePool->getNodeIdx(curNode); 					neighbourNode->flags |=
-  // DT_NODE_CLOSED; 					stack[nstack++] = neighbourNode;
-  // 				}
-  // 			}
-  // 		}
-  // 	}
-  // }
-
-  // int n = 0;
-  // if (bestNode)
-  // {
-  // 	// Reverse the path.
-  // 	dtNode* prev = 0;
-  // 	dtNode* node = bestNode;
-  // 	do
-  // 	{
-  // 		dtNode* next = m_tinyNodePool->getNodeAtIdx(node->pidx);
-  // 		node->pidx = m_tinyNodePool->getNodeIdx(prev);
-  // 		prev = node;
-  // 		node = next;
-  // 	}
-  // 	while (node);
-
-  // 	// Store result
-  // 	node = prev;
-  // 	do
-  // 	{
-  // 		visited[n++] = node->id;
-  // 		if (n >= maxVisitedSize)
-  // 		{
-  // 			status |= DT_BUFFER_TOO_SMALL;
-  // 			break;
-  // 		}
-  // 		node = m_tinyNodePool->getNodeAtIdx(node->pidx);
-  // 	}
-  // 	while (node);
-  // }
-
-  // dtVcopy(resultPos, bestPos);
-
-  // *visitedCount = n;
-
-  // return status;
 }
 
 dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, dtPolyRef to, float* left, float* right,
